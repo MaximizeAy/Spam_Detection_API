@@ -1,0 +1,8 @@
+{
+    "model_name": "Spam Detection Ensemble",
+    "version": "1.0.0",
+    "vectorizer": "TF-IDF",
+    "algorithm": "Soft Voting",
+    "accuracy": 0.992,
+    "f1_score": 0.989
+}
