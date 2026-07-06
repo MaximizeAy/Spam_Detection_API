@@ -74,7 +74,10 @@ def run_model_inference(text: str) -> MLVerdict:
     Used by BOTH /predict and /analyze so we never make HTTP calls to ourselves.
     """
     clean_message = normalize_message(text)
-    sample = pd.DataFrame([extract_custom_features(clean_message)])
+    sample = pd.DataFrame(
+        [extract_custom_features(clean_message)], 
+        index=[0]
+    )
 
     start_time = time.perf_counter()
     prediction = model.predict(sample)
