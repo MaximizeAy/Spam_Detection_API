@@ -148,7 +148,7 @@ Returns the operational status of the API and confirms the ML model is loaded in
 Authentication & Security
 -------------------------
 
-Currently, the API does not require authentication keys for internal microservice communication.
+Currently, the API does not require authentication keys for internal microservice communication, and the backend is hosted on a "FREE" Render instance and may take a short time to wake up after periods of inactivity.
 
 If exposing this API to the public internet, it is highly recommended to place it behind an API Gateway (like AWS API Gateway, Cloudflare Workers, or Nginx) to handle rate limiting and API key validation.
 
