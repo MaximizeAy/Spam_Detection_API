@@ -1,5 +1,0 @@
-2026-07-04 12:08:33,316 INFO Prediction=Spam, Confidence=0.9227
-2026-07-04 12:09:08,690 INFO Prediction=Spam, Confidence=0.9400
-2026-07-04 12:09:42,518 INFO Prediction=Ham, Confidence=0.9886
-2026-07-04 12:10:04,589 INFO Prediction=Ham, Confidence=0.8116
-2026-07-04 12:10:25,860 INFO Prediction=Ham, Confidence=0.7326
