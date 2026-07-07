@@ -8,6 +8,8 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, field_validator
 from joblib import load
 
+# Transformer file
+from stc import transformers
 # Import the rule engine and fusion logic
 from rule_engine import analyze_email
 from fusion import fuse_verdicts, MLVerdict
