@@ -123,7 +123,7 @@ app.add_middleware(
         "http://127.0.0.1:5173",
         "http://127.0.0.1:3000",
         "https://spam-detection-api-574s.onrender.com",
-        "https://spam-detection-ui.vercel.app/"
+        "https://spam-detection-ui.vercel.app"
     ],
     allow_credentials=True,
     allow_methods=["*"],
