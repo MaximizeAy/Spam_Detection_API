@@ -42,78 +42,102 @@ def _ml_label_to_internal(prediction: str) -> str:
     return "safe"
 
 
-def fuse_verdicts(ml: MLVerdict, rules: RuleAnalysis) -> FusedResult:
+# Inside fusion.py
+from pydantic import BaseModel
 
-    ml_internal_class = _ml_label_to_internal(ml.prediction)
-    ml_confidence_pct = round(ml.confidence * 100)
+# Make sure these match your actual data structures
+class MLVerdict(BaseModel):
+    prediction: str
+    confidence: float
+    features: dict
 
-    # ── Step 1: Rule-based override check ──
-    # If ML says "Ham" but rules found a hard spam signal, override
-    override_reason = None
-    if ml_internal_class == "safe":
-        for feat in rules.features:
-            if feat.id in HARD_SPAM_TRIGGERS and feat.score >= HARD_SPAM_SCORE_THRESHOLD:
-                override_reason = (
-                    f"Rule override: '{feat.name}' scored {feat.score} "
-                    f"but model predicted '{ml.prediction}' at {ml_confidence_pct}%"
-                )
-                # Bump ML side to at least 60 so the fusion math doesn't drown it
-                ml_confidence_pct = max(ml_confidence_pct, 60)
-                ml_internal_class = "suspicious"
-                break
+class RulesVerdict(BaseModel):
+    verdict: str
+    confidence: float
 
-    # ── Step 2: Dynamic weight selection ──
-    if override_reason:
-        # Override triggered — split evenly, rules already influenced ML side
-        ml_weight, rule_weight, strategy = 0.50, 0.50, "ml_primary_with_rule_override"
-    elif ml_confidence_pct < 50:
-        # ML is uncertain or says safe — lean on rules
-        ml_weight, rule_weight, strategy = 0.40, 0.60, "rules_primary_ml_uncertain"
+class FusedVerdict(BaseModel):
+    final_verdict: str
+    final_confidence: float
+    ml: dict
+    rules: dict
+    strategy: str
+    override_reason: str | None
+
+def fuse_verdicts(ml: MLVerdict, rules: RulesVerdict) -> FusedVerdict:
+    """
+    Fuses ML and Rule Engine results. 
+    ML is the primary driver. Rules act as a 'nudge' rather than a hard override.
+    """
+    
+    # ==========================================
+    # 1. SETUP YOUR "TUNING KNOBS" HERE
+    # ==========================================
+    # How much should rules push the ML score? 
+    # Keep these numbers LOW (0.05 to 0.15) so ML stays in control.
+    RULE_SPAM_BOOST = 0.10    # If rules say spam, add 10% to ML confidence
+    RULE_SAFE_BOOST = 0.10    # If rules say safe, add 10% to ML safe confidence
+    ML_DOMINANCE_THRESHOLD = 0.75 # If ML is this confident, IGNORE rules completely
+    
+    # ==========================================
+    # 2. ESTABLISH THE ML BASELINE
+    # ==========================================
+    # Convert ML prediction into a 0.0 to 1.0 "spam score"
+    if ml.prediction.lower() == "spam":
+        ml_spam_score = ml.confidence
     else:
-        # ML is confident — trust it, use rules for context
-        ml_weight, rule_weight, strategy = 0.65, 0.35, "ml_primary"
+        ml_spam_score = 1.0 - ml.confidence
 
-    # ── Step 3: Weighted fusion ──
-    fused = round(ml_confidence_pct * ml_weight + rules.confidence * rule_weight)
-    fused = max(0, min(100, fused))
+    final_score = ml_spam_score
+    strategy = "ml_driven"
+    override_reason = None
 
-    if fused >= 70:
+    # ==========================================
+    # 3. APPLY RULES AS A "NUDGE" (Not an override)
+    # ==========================================
+    
+    # Scenario A: ML is VERY confident. Trust the ML model entirely.
+    if ml.confidence >= ML_DOMINANCE_THRESHOLD:
+        strategy = "ml_dominant"
+        override_reason = f"ML confidence ({ml.confidence:.2f}) exceeded threshold. Rules ignored."
+        
+    # Scenario B: ML is unsure. Let the rules nudge the score.
+    else:
+        if rules.verdict.lower() == "spam":
+            final_score += RULE_SPAM_BOOST
+            strategy = "rule_assisted_spam"
+            override_reason = f"ML uncertain. Rules detected spam, applied +{RULE_SPAM_BOOST} boost."
+            
+        elif rules.verdict.lower() == "safe":
+            final_score -= RULE_SAFE_BOOST
+            strategy = "rule_assisted_safe"
+            override_reason = f"ML uncertain. Rules detected safe, applied -{RULE_SAFE_BOOST} penalty."
+
+    # ==========================================
+    # 4. FINAL CALCULATION
+    # ==========================================
+    # Clamp the score between 0.0 and 1.0 just in case
+    final_score = max(0.0, min(1.0, final_score))
+    
+    # 0.5 is the middle threshold. Above 0.5 = Spam, Below 0.5 = Safe
+    if final_score >= 0.5:
         final_verdict = "spam"
-    elif fused >= 40:
-        final_verdict = "suspicious"
+        final_confidence = final_score
     else:
         final_verdict = "safe"
+        final_confidence = 1.0 - final_score # Flip confidence for "safe"
 
-    # ── Step 4: Build response ──
-    return FusedResult(
+    return FusedVerdict(
         final_verdict=final_verdict,
-        final_confidence=fused,
+        final_confidence=round(final_confidence, 4),
         ml={
             "prediction": ml.prediction,
-            "internal_class": ml_internal_class,
-            "confidence_pct": ml_confidence_pct,
-            "confidence_raw": round(ml.confidence, 4),
-            "model": ml.model,
-            "version": ml.version,
-            "prediction_time_ms": ml.prediction_time_ms,
+            "confidence_pct": f"{ml.confidence * 100:.1f}%",
             "features": ml.features,
         },
         rules={
-            "verdict": rules.classification,
+            "verdict": rules.verdict,
             "confidence": rules.confidence,
-            "features": [
-                {
-                    "id": f.id,
-                    "name": f.name,
-                    "desc": f.desc,
-                    "icon": f.icon,
-                    "score": f.score,
-                    "severity": f.severity,
-                    "type": f.type,
-                }
-                for f in rules.features
-            ],
         },
         strategy=strategy,
-        override_reason=override_reason,
+        override_reason=override_reason
     )
