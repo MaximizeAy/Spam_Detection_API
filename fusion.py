@@ -1,59 +1,13 @@
 # fusion.py
-"""Score fusion adapted to the actual ensemble model output schema."""
-
-from dataclasses import dataclass
-from rule_engine import RuleAnalysis
-
-
-@dataclass
-class MLVerdict:
-    prediction: str          # "Spam", "Ham", etc.
-    confidence: float        # 0.0 – 1.0
-    model: str               # "Soft Voting Ensemble"
-    version: str             # "1.0.0"
-    normalized_message: str
-    message_length: int
-    prediction_time_ms: float
-    features: dict           # { has_url, url_count, security_keyword_count, urgency_count }
-
-
-@dataclass
-class FusedResult:
-    final_verdict: str
-    final_confidence: int
-    ml: dict
-    rules: dict
-    strategy: str
-    override_reason: str | None
-
-
-# ── Hard-signal rules that can veto a "Ham" prediction ──
-HARD_SPAM_TRIGGERS = {"pharma_keywords", "sender_impersonation"}
-HARD_SPAM_SCORE_THRESHOLD = 18
-
-
-def _ml_label_to_internal(prediction: str) -> str:
-    p = prediction.lower().strip()
-    if p in ("spam", "phishing", "fraud"):
-        return "spam"
-    if p in ("suspicious", "review"):
-        return "suspicious"
-    # "Ham", "Safe", "Not Spam", etc.
-    return "safe"
-
-
-# Inside fusion.py
 from pydantic import BaseModel
 
-# Make sure these match your actual data structures
+# We don't need to redefine RuleAnalysis here, we just accept it as a type hint
+from rule_engine import RuleAnalysis 
+
 class MLVerdict(BaseModel):
     prediction: str
     confidence: float
     features: dict
-
-class RulesVerdict(BaseModel):
-    verdict: str
-    confidence: float
 
 class FusedVerdict(BaseModel):
     final_verdict: str
@@ -63,25 +17,22 @@ class FusedVerdict(BaseModel):
     strategy: str
     override_reason: str | None
 
-def fuse_verdicts(ml: MLVerdict, rules: RulesVerdict) -> FusedVerdict:
+def fuse_verdicts(ml: MLVerdict, rules: RuleAnalysis) -> FusedVerdict:
     """
     Fuses ML and Rule Engine results. 
-    ML is the primary driver. Rules act as a 'nudge' rather than a hard override.
+    ML is the primary driver (0.0 to 1.0 scale).
+    Rules act as a weighted 'nudge' based on their 0-100 confidence scale.
     """
     
     # ==========================================
-    # 1. SETUP YOUR "TUNING KNOBS" HERE
+    # 1. SETUP YOUR "TUNING KNOBS"
     # ==========================================
-    # How much should rules push the ML score? 
-    # Keep these numbers LOW (0.05 to 0.15) so ML stays in control.
-    RULE_SPAM_BOOST = 0.10    # If rules say spam, add 10% to ML confidence
-    RULE_SAFE_BOOST = 0.10    # If rules say safe, add 10% to ML safe confidence
-    ML_DOMINANCE_THRESHOLD = 0.75 # If ML is this confident, IGNORE rules completely
+    ML_DOMINANCE_THRESHOLD = 0.75 # If ML is 75%+ confident, ignore rules completely
+    MAX_RULE_BOOST = 0.15         # Maximum 15% shift allowed by the rule engine
     
     # ==========================================
-    # 2. ESTABLISH THE ML BASELINE
+    # 2. ESTABLISH THE ML BASELINE (0.0 to 1.0)
     # ==========================================
-    # Convert ML prediction into a 0.0 to 1.0 "spam score"
     if ml.prediction.lower() == "spam":
         ml_spam_score = ml.confidence
     else:
@@ -92,39 +43,68 @@ def fuse_verdicts(ml: MLVerdict, rules: RulesVerdict) -> FusedVerdict:
     override_reason = None
 
     # ==========================================
-    # 3. APPLY RULES AS A "NUDGE" (Not an override)
+    # 3. APPLY RULES AS A WEIGHTED "NUDGE"
     # ==========================================
     
-    # Scenario A: ML is VERY confident. Trust the ML model entirely.
+    # If ML is VERY confident, trust it entirely
     if ml.confidence >= ML_DOMINANCE_THRESHOLD:
         strategy = "ml_dominant"
-        override_reason = f"ML confidence ({ml.confidence:.2f}) exceeded threshold. Rules ignored."
+        override_reason = f"ML confidence ({ml.confidence*100:.1f}%) exceeded threshold. Rules ignored."
         
-    # Scenario B: ML is unsure. Let the rules nudge the score.
+    # If ML is unsure, let the rules nudge the score
     else:
-        if rules.verdict.lower() == "spam":
-            final_score += RULE_SPAM_BOOST
+        # Rule engine confidence is 0-100, convert it to a 0.0-1.0 weight
+        rule_weight = rules.confidence / 100.0 
+        
+        if rules.classification == "spam":
+            # Higher rule confidence = bigger boost towards spam
+            boost = rule_weight * MAX_RULE_BOOST
+            final_score += boost
             strategy = "rule_assisted_spam"
-            override_reason = f"ML uncertain. Rules detected spam, applied +{RULE_SPAM_BOOST} boost."
+            override_reason = f"ML uncertain. Rules classified as spam ({rules.confidence}%), applied +{boost:.2f} boost."
             
-        elif rules.verdict.lower() == "safe":
-            final_score -= RULE_SAFE_BOOST
+        elif rules.classification == "safe":
+            # Higher rule confidence = bigger boost towards safe
+            penalty = rule_weight * MAX_RULE_BOOST
+            final_score -= penalty
             strategy = "rule_assisted_safe"
-            override_reason = f"ML uncertain. Rules detected safe, applied -{RULE_SAFE_BOOST} penalty."
+            override_reason = f"ML uncertain. Rules classified as safe ({rules.confidence}%), applied -{penalty:.2f} penalty."
+            
+        elif rules.classification == "suspicious":
+            # "Suspicious" nudges slightly towards spam, but at half strength
+            sus_boost = (rule_weight * MAX_RULE_BOOST) * 0.5
+            final_score += sus_boost
+            strategy = "rule_assisted_suspicious"
+            override_reason = f"ML uncertain. Rules flagged as suspicious ({rules.confidence}%), applied +{sus_boost:.2f} boost."
 
     # ==========================================
     # 4. FINAL CALCULATION
     # ==========================================
-    # Clamp the score between 0.0 and 1.0 just in case
     final_score = max(0.0, min(1.0, final_score))
     
-    # 0.5 is the middle threshold. Above 0.5 = Spam, Below 0.5 = Safe
     if final_score >= 0.5:
         final_verdict = "spam"
         final_confidence = final_score
     else:
         final_verdict = "safe"
-        final_confidence = 1.0 - final_score # Flip confidence for "safe"
+        final_confidence = 1.0 - final_score
+
+    # ==========================================
+    # 5. PREPARE PAYLOAD FOR REACT FRONTEND
+    # ==========================================
+    # We must manually convert the RuleAnalysis dataclass features into 
+    # a list of dictionaries, otherwise FastAPI will throw a serialization error.
+    rules_features_json = [
+        {
+            "id": f.id,
+            "name": f.name,
+            "desc": f.desc,
+            "icon": f.icon,
+            "score": f.score,
+            "severity": f.severity,
+            "type": f.type
+        } for f in rules.features
+    ]
 
     return FusedVerdict(
         final_verdict=final_verdict,
@@ -135,8 +115,9 @@ def fuse_verdicts(ml: MLVerdict, rules: RulesVerdict) -> FusedVerdict:
             "features": ml.features,
         },
         rules={
-            "verdict": rules.verdict,
-            "confidence": rules.confidence,
+            "verdict": rules.classification, # Map 'classification' to 'verdict' for the frontend
+            "confidence": rules.confidence,   # Pass the 0-100 integer
+            "features": rules_features_json   # Pass the detailed rule flags!
         },
         strategy=strategy,
         override_reason=override_reason
