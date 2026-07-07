@@ -9,7 +9,7 @@ from pydantic import BaseModel, field_validator
 from joblib import load
 
 # Transformer file
-from stc import transformers
+from src import transformers
 # Import the rule engine and fusion logic
 from rule_engine import analyze_email
 from fusion import fuse_verdicts, MLVerdict
